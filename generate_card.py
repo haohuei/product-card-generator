@@ -362,9 +362,14 @@ def _render_taiwan_dm(src: Image.Image, size: Tuple[int, int],
     # 短橫線
     draw.rectangle([(pad, zone_top), (pad + int(cw * 0.06), zone_top + 2)],
                    fill=(140, 160, 140))
-    draw.text((pad + int(cw * 0.08), zone_top - 10),
-              "SELECTED  —  精選",
-              fill=(130, 125, 115), font=label_font)
+    # 用 middle dot (·) 而非 em-dash，避免 Streamlit Cloud Pillow 版本缺字 glyph
+    try:
+        draw.text((pad + int(cw * 0.08), zone_top - 10),
+                  "SELECTED · 精選",
+                  fill=(130, 125, 115), font=label_font)
+    except Exception:
+        draw.text((pad + int(cw * 0.08), zone_top - 10),
+                  "SELECTED", fill=(130, 125, 115), font=label_font)
 
     # 2) 品名：bold warm dark，自動縮字
     name_font_path = _find_font(FONT_CANDIDATES_BOLD)

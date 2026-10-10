@@ -30,7 +30,7 @@ ASPECT_SIZES = {
     "4:5": (1080, 1350),
 }
 
-TEMPLATES = ["clean", "korean_beauty", "taiwan_daigou"]
+TEMPLATES = ["clean", "korean_beauty", "taiwan_daigou", "taiwan_dm"]
 
 FONT_CANDIDATES_BOLD = [
     "/System/Library/Fonts/PingFang.ttc",
@@ -317,6 +317,109 @@ def _render_daigou(src: Image.Image, size: Tuple[int, int],
     return canvas
 
 
+# ============================================================
+# Template D · taiwan_dm  （參考 Pinterest 「產品 dm 排版 設計」）
+# ============================================================
+# Design notes:
+# - 大量留白 60%+（商品小而精）
+# - 米色底 / 淡 sage / warm grey 文字
+# - 商品置上，下方分區塊：brand label → 品名 → 規格 → 價格 pill
+# - 文字絕不蓋在商品上
+# - 「件/折」風格 badge 可選（price 填 "8折" / "2件75折" 也可）
+
+def _render_taiwan_dm(src: Image.Image, size: Tuple[int, int],
+                      name: str, specs: str, price: str,
+                      tag: str | None = None) -> Image.Image:
+    cw, ch = size
+    # 米色底
+    canvas = Image.new("RGB", size, (247, 242, 236))
+
+    # 商品等比塞入上方 55% 區域（直式）/ 50%（方圖）
+    product_zone_ratio = 0.55 if ch > cw else 0.50
+    sub = Image.new("RGB", (cw, int(ch * product_zone_ratio)))
+    x, y, nw, nh = _fit_contain(src, sub, pad_ratio=0.15)
+    y += int(ch * 0.05)
+    main = src.convert("RGB").resize((nw, nh), Image.LANCZOS)
+
+    # 商品柔和陰影（warm grey）
+    shadow = Image.new("RGBA", size, (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    sd.rounded_rectangle([(x + 6, y + 18), (x + nw + 6, y + nh + 18)],
+                         radius=8, fill=(120, 100, 80, 45))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=22))
+    canvas = Image.alpha_composite(canvas.convert("RGBA"), shadow).convert("RGB")
+    canvas.paste(main, (x, y))
+
+    draw = ImageDraw.Draw(canvas)
+
+    # 分區塊起點（商品下方）
+    pad = int(cw * 0.09)
+    zone_top = int(ch * (product_zone_ratio + 0.06))
+
+    # 1) Brand label：細線 + 小字
+    label_font = _load_font(_find_font(FONT_CANDIDATES_REGULAR),
+                            int(cw * 0.022))
+    # 短橫線
+    draw.rectangle([(pad, zone_top), (pad + int(cw * 0.06), zone_top + 2)],
+                   fill=(140, 160, 140))
+    draw.text((pad + int(cw * 0.08), zone_top - 10),
+              "SELECTED  —  精選",
+              fill=(130, 125, 115), font=label_font)
+
+    # 2) 品名：bold warm dark，自動縮字
+    name_font_path = _find_font(FONT_CANDIDATES_BOLD)
+    name_y = zone_top + int(ch * 0.035)
+    size_px = int(cw * 0.052)
+    while size_px > int(cw * 0.03):
+        font_name = _load_font(name_font_path, size_px)
+        bbox = draw.textbbox((0, 0), name, font=font_name)
+        if (bbox[2] - bbox[0]) <= cw - pad * 2:
+            break
+        size_px -= 2
+    draw.text((pad, name_y), name, fill=(55, 50, 42), font=font_name)
+
+    # 3) 規格：dusty 灰細字 with · 分隔感
+    spec_font = _load_font(_find_font(FONT_CANDIDATES_REGULAR),
+                           int(cw * 0.025))
+    spec_y = name_y + int(cw * 0.065)
+    draw.text((pad, spec_y), specs, fill=(145, 135, 120), font=spec_font)
+
+    # 4) 底部價格/優惠 pill — 細線框，不填滿，避免搶眼
+    if price:
+        price_font = _load_font(_find_font(FONT_CANDIDATES_BOLD),
+                                int(cw * 0.038))
+        bbox = draw.textbbox((0, 0), price, font=price_font)
+        pw = bbox[2] - bbox[0]
+        ph = bbox[3] - bbox[1]
+        px_pad, py_pad = int(cw * 0.028), int(cw * 0.016)
+        p_x1 = pad
+        p_y1 = spec_y + int(cw * 0.055)
+        p_x2 = p_x1 + pw + px_pad * 2
+        p_y2 = p_y1 + ph + py_pad * 2
+        # 細線框，米色底
+        draw.rounded_rectangle([(p_x1, p_y1), (p_x2, p_y2)],
+                               radius=int((p_y2 - p_y1) * 0.5),
+                               outline=(76, 125, 94), width=2,
+                               fill=(252, 248, 243))
+        draw.text((p_x1 + px_pad, p_y1 + py_pad - 2), price,
+                  fill=(76, 125, 94), font=price_font)
+
+        # 右側小字補充（若 price 看起來不像 NT$，加「參考價」）
+        if "NT$" not in price and "元" not in price and "%" not in price:
+            hint_font = _load_font(_find_font(FONT_CANDIDATES_REGULAR),
+                                   int(cw * 0.02))
+            draw.text((p_x2 + int(cw * 0.025),
+                       p_y1 + py_pad + 4),
+                      "/ 單件", fill=(160, 155, 145), font=hint_font)
+
+    # 5) tag：右上 sage pill（低調）
+    if tag:
+        _draw_small_tag(canvas, tag, pos="top-right",
+                        bg=(76, 125, 94, 220), fg=(255, 255, 255),
+                        font_size_ratio=0.024)
+    return canvas
+
+
 # ---------- 共用 tag ----------
 
 def _draw_small_tag(canvas: Image.Image, text: str,
@@ -373,6 +476,7 @@ def generate_card(image_path: str, name: str, specs: str, price: str,
         "clean": _render_clean,
         "korean_beauty": _render_kbeauty,
         "taiwan_daigou": _render_daigou,
+        "taiwan_dm": _render_taiwan_dm,
     }[template]
     canvas = renderer(src, size, name=name, specs=specs, price=price, tag=tag)
 

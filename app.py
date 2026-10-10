@@ -70,6 +70,7 @@ TEMPLATE_LABELS = {
     "korean_beauty":  "B · K-beauty（軟色調 + 圓貼紙）",
     "taiwan_daigou":  "C · 台灣代購（黃紅色塊 + 大價格）",
     "taiwan_dm":      "D · 台灣 DM（米色留白 + 分區塊，建議 9:16）",
+    "promo_bundle":   "E · 促銷組合（黃底 + 多商品 + 大% / 大價格）",
 }
 
 # ============================================================
@@ -108,6 +109,17 @@ if mode == "單張":
         "商品原圖", type=["jpg", "jpeg", "png", "webp"],
         label_visibility="collapsed",
     )
+
+    # E 模板專用：額外 1-2 張組合商品圖
+    extra_files = []
+    if template_label == TEMPLATE_LABELS["promo_bundle"]:
+        st.caption("E 模板支援組合包：可額外上傳 1-2 張商品圖，自動橫排 + 「+」連接")
+        extra_files = st.file_uploader(
+            "額外商品圖（可選，共 1-2 張組合包）",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True, key="extra_bundle_files",
+        )
+        extra_files = (extra_files or [])[:2]
 
     # 顯示 auto-suggest（有圖時）
     if file and template_label == "（自動偵測）":
@@ -159,12 +171,21 @@ if mode == "單張":
             tf.write(file.getvalue())
             in_path = tf.name
         template_key = resolve_template(template_label, in_path)
+
+        # extras 寫到暫存檔
+        extra_paths = []
+        for ef in extra_files or []:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as etf:
+                etf.write(ef.getvalue())
+                extra_paths.append(etf.name)
+
         out_path = Path(tempfile.gettempdir()) / f"card_{Path(file.name).stem}.jpg"
         generate_card(
             image_path=in_path, name=name, specs=specs or "",
             price=price or "", out_path=str(out_path),
             aspect=aspect, template=template_key,
             tag=None if tag == "(無)" else tag,
+            extra_image_paths=extra_paths,
         )
         st.image(str(out_path),
                  caption=f"{aspect} · {TEMPLATE_LABELS[template_key]}",

@@ -30,7 +30,8 @@ ASPECT_SIZES = {
     "4:5": (1080, 1350),
 }
 
-TEMPLATES = ["clean", "korean_beauty", "taiwan_daigou", "taiwan_dm"]
+TEMPLATES = ["clean", "korean_beauty", "taiwan_daigou", "taiwan_dm",
+             "promo_bundle"]
 
 FONT_CANDIDATES_BOLD = [
     "/System/Library/Fonts/PingFang.ttc",
@@ -425,6 +426,185 @@ def _render_taiwan_dm(src: Image.Image, size: Tuple[int, int],
     return canvas
 
 
+# ============================================================
+# Template E · promo_bundle  (參考 MISE EN SCÈNE 促銷 DM)
+# ============================================================
+# Design:
+# - 黃底 (#FFCF2E) 大背景，底部柔和漸層
+# - 頂部黑色品牌 pill（取 name 第一段）
+# - 中間 1-3 個商品橫排，之間畫紫色「+」圓圈
+# - 底部左：巨大紫色價格/折扣數字 (支援 "25%" / "NT$5888")
+# - 底部右：白色圓角 pill，置中黑字品名
+# - 支援 extra_image_paths = [path2, path3] 做組合包
+
+def _render_promo_bundle(src_paths, size, name, specs, price,
+                         tag=None, extras=None):
+    """
+    src_paths = 第一張必填（主商品）
+    extras = [path, ...] 可選 1-2 張額外商品圖（組合包）
+    """
+    cw, ch = size
+    # 1) 底：黃色 + 底部漸層
+    canvas = Image.new("RGB", size, (255, 207, 46))
+    # 底部漸層到更亮的奶黃，製造光感
+    grad = Image.new("RGBA", size, (0, 0, 0, 0))
+    gmask = _gradient_alpha(cw, ch, max_alpha=120, ease=1.3, direction="down")
+    tint = Image.new("RGBA", size, (255, 236, 150, 255))
+    tint.putalpha(gmask)
+    canvas = Image.alpha_composite(canvas.convert("RGBA"), tint).convert("RGB")
+    draw = ImageDraw.Draw(canvas)
+
+    # 2) 頂部品牌 pill（抓品牌：空白分隔前 2 詞 or 全名若短）
+    tokens = name.split()
+    if len(tokens) >= 2 and len(" ".join(tokens[:2])) <= 22:
+        brand_label = " ".join(tokens[:2])
+    elif len(tokens) >= 1 and len(tokens[0]) <= 22:
+        brand_label = tokens[0]
+    else:
+        brand_label = name[:22]
+    brand_font = _load_font(_find_font(FONT_CANDIDATES_BOLD), int(cw * 0.038))
+    bbox = draw.textbbox((0, 0), brand_label, font=brand_font)
+    tw = bbox[2] - bbox[0]; th = bbox[3] - bbox[1]
+    px, py = int(cw * 0.04), int(cw * 0.016)
+    bx1 = (cw - tw - px * 2) // 2
+    by1 = int(ch * 0.035)
+    bx2 = bx1 + tw + px * 2
+    by2 = by1 + th + py * 2
+    draw.rounded_rectangle([(bx1, by1), (bx2, by2)],
+                           radius=int((by2 - by1) * 0.5),
+                           fill=(20, 20, 20))
+    draw.text((bx1 + px, by1 + py - 2), brand_label,
+              fill=(255, 255, 255), font=brand_font)
+
+    # 3) 商品區：橫排 1-3 張 + 「+」圓圈
+    all_imgs = [Image.open(p).convert("RGBA") for p in [src_paths] + (extras or [])]
+    n = len(all_imgs)
+    product_zone_top = by2 + int(ch * 0.03)
+    product_zone_bot = int(ch * 0.62)
+    zone_h = product_zone_bot - product_zone_top
+    zone_w = int(cw * 0.86)
+    zone_x = (cw - zone_w) // 2
+
+    # 配置：每張商品等寬，之間留 "+" 空間
+    gap_w = int(cw * 0.07)
+    item_w = (zone_w - gap_w * (n - 1)) // n if n > 0 else zone_w
+
+    positions = []  # (x, y, w, h) for each item
+    for i in range(n):
+        ix = zone_x + i * (item_w + gap_w)
+        positions.append((ix, product_zone_top, item_w, zone_h))
+
+    for i, (img, (ix, iy, iw, ih)) in enumerate(zip(all_imgs, positions)):
+        ratio = min(iw / img.width, ih / img.height)
+        nw, nh = int(img.width * ratio), int(img.height * ratio)
+        px_x = ix + (iw - nw) // 2
+        px_y = iy + (ih - nh) // 2
+        resized = img.resize((nw, nh), Image.LANCZOS)
+        # 柔和陰影
+        sh = Image.new("RGBA", size, (0, 0, 0, 0))
+        sd = ImageDraw.Draw(sh)
+        sd.rounded_rectangle([(px_x + 5, px_y + 10), (px_x + nw + 5, px_y + nh + 10)],
+                             radius=10, fill=(100, 70, 0, 60))
+        sh = sh.filter(ImageFilter.GaussianBlur(radius=15))
+        canvas = Image.alpha_composite(canvas.convert("RGBA"), sh).convert("RGB")
+        canvas.paste(resized, (px_x, px_y), resized if resized.mode == "RGBA" else None)
+
+    # 重取 draw（canvas 可能已 re-create）
+    draw = ImageDraw.Draw(canvas)
+
+    # 「+」紫色圓圈，放在每兩張商品中間
+    if n > 1:
+        plus_font = _load_font(_find_font(FONT_CANDIDATES_BOLD), int(cw * 0.055))
+        r = int(cw * 0.038)
+        cy = product_zone_top + zone_h // 2
+        for i in range(n - 1):
+            cx = zone_x + (i + 1) * item_w + i * gap_w + gap_w // 2
+            draw.ellipse([(cx - r, cy - r), (cx + r, cy + r)],
+                         fill=(80, 55, 180))
+            # 「+」
+            bb = draw.textbbox((0, 0), "+", font=plus_font)
+            pw = bb[2] - bb[0]; ph = bb[3] - bb[1]
+            draw.text((cx - pw // 2, cy - ph // 2 - int(cw * 0.012)),
+                      "+", fill=(255, 255, 255), font=plus_font)
+
+    # 4) 巨大價格/折扣（紫色）— 左下，位於商品下方與底部 pill 之間
+    if price:
+        is_percent = "%" in price
+        pad = int(cw * 0.06)
+        # 價格垂直基線：商品下方 + pill 上方之間
+        base_y = int(ch * 0.66)
+        if is_percent:
+            num = price.replace("%", "").strip()
+            num_font = _load_font(_find_font(FONT_CANDIDATES_BOLD), int(cw * 0.18))
+            pct_font = _load_font(_find_font(FONT_CANDIDATES_BOLD), int(cw * 0.065))
+            bb = draw.textbbox((0, 0), num, font=num_font)
+            nw2 = bb[2] - bb[0]; nh2 = bb[3] - bb[1]
+            draw.text((pad, base_y), num, fill=(80, 55, 180), font=num_font)
+            draw.text((pad + nw2 + int(cw * 0.008), base_y + int(nh2 * 0.25)),
+                      "%", fill=(80, 55, 180), font=pct_font)
+        else:
+            size_px = int(cw * 0.12)
+            while size_px > int(cw * 0.06):
+                price_font = _load_font(_find_font(FONT_CANDIDATES_BOLD), size_px)
+                bb = draw.textbbox((0, 0), price, font=price_font)
+                if (bb[2] - bb[0]) <= cw * 0.5:
+                    break
+                size_px -= 3
+            draw.text((pad, base_y + int(cw * 0.015)), price,
+                      fill=(80, 55, 180), font=price_font)
+
+    # 5) 底部白色圓角 pill：品名置中
+    name_font_path = _find_font(FONT_CANDIDATES_BOLD)
+    pill_name = name if specs == "" else f"{name}"
+    sub_text = specs if specs else None
+
+    size_px = int(cw * 0.038)
+    while size_px > int(cw * 0.024):
+        pname_font = _load_font(name_font_path, size_px)
+        bb = draw.textbbox((0, 0), pill_name, font=pname_font)
+        if (bb[2] - bb[0]) <= cw * 0.82:
+            break
+        size_px -= 2
+    bb = draw.textbbox((0, 0), pill_name, font=pname_font)
+    nw2 = bb[2] - bb[0]; nh2 = bb[3] - bb[1]
+
+    sub_h = 0
+    if sub_text:
+        sub_font = _load_font(_find_font(FONT_CANDIDATES_REGULAR),
+                              int(cw * 0.028))
+        sb = draw.textbbox((0, 0), sub_text, font=sub_font)
+        sub_h = (sb[3] - sb[1]) + int(cw * 0.01)
+
+    pad_x = int(cw * 0.05)
+    pad_y = int(cw * 0.025)
+    pill_w = min(int(cw * 0.88), nw2 + pad_x * 2 + int(cw * 0.04))
+    pill_h = nh2 + sub_h + pad_y * 2
+    px1 = (cw - pill_w) // 2
+    # Pill 貼底
+    py2 = ch - int(ch * 0.035)
+    py1 = py2 - pill_h
+    px2 = px1 + pill_w
+
+    draw.rounded_rectangle([(px1, py1), (px2, py2)],
+                           radius=int(pill_h * 0.5),
+                           fill=(255, 255, 255))
+    # 品名置中
+    draw.text(((cw - nw2) // 2, py1 + pad_y - 2), pill_name,
+              fill=(30, 30, 30), font=pname_font)
+    if sub_text:
+        sb = draw.textbbox((0, 0), sub_text, font=sub_font)
+        sw = sb[2] - sb[0]
+        draw.text(((cw - sw) // 2, py1 + pad_y + nh2 + int(cw * 0.005)),
+                  sub_text, fill=(120, 115, 110), font=sub_font)
+
+    # 6) tag：右上紫色 pill（可選）
+    if tag:
+        _draw_small_tag(canvas, tag, pos="top-right",
+                        bg=(80, 55, 180, 240), fg=(255, 255, 255),
+                        font_size_ratio=0.028)
+    return canvas
+
+
 # ---------- 共用 tag ----------
 
 def _draw_small_tag(canvas: Image.Image, text: str,
@@ -466,7 +646,8 @@ def _draw_small_tag(canvas: Image.Image, text: str,
 def generate_card(image_path: str, name: str, specs: str, price: str,
                   out_path: str, aspect: str = "1:1",
                   template: str = "clean",
-                  tag: str | None = None) -> str:
+                  tag: str | None = None,
+                  extra_image_paths: list | None = None) -> str:
     if aspect not in ASPECT_SIZES:
         raise ValueError(f"aspect 必須是 {list(ASPECT_SIZES)}")
     if template == "auto":
@@ -474,16 +655,22 @@ def generate_card(image_path: str, name: str, specs: str, price: str,
     if template not in TEMPLATES:
         raise ValueError(f"template 必須是 {TEMPLATES} 或 'auto'")
 
-    src = Image.open(image_path)
     size = ASPECT_SIZES[aspect]
 
-    renderer = {
-        "clean": _render_clean,
-        "korean_beauty": _render_kbeauty,
-        "taiwan_daigou": _render_daigou,
-        "taiwan_dm": _render_taiwan_dm,
-    }[template]
-    canvas = renderer(src, size, name=name, specs=specs, price=price, tag=tag)
+    if template == "promo_bundle":
+        canvas = _render_promo_bundle(
+            image_path, size, name=name, specs=specs, price=price,
+            tag=tag, extras=extra_image_paths or [])
+    else:
+        src = Image.open(image_path)
+        renderer = {
+            "clean": _render_clean,
+            "korean_beauty": _render_kbeauty,
+            "taiwan_daigou": _render_daigou,
+            "taiwan_dm": _render_taiwan_dm,
+        }[template]
+        canvas = renderer(src, size, name=name, specs=specs,
+                          price=price, tag=tag)
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)

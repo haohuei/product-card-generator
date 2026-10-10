@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-商品卡產生器 — Streamlit Web UI
+商品卡產生器 · Streamlit Web UI
 ---------------------------------------------------
 手機瀏覽器打開可用、加到主畫面變類 App。
+支援 3 個商品 DM 版型：clean / korean_beauty / taiwan_daigou。
 """
 from __future__ import annotations
 
@@ -16,64 +17,86 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-from generate_card import generate_card, ASPECT_SIZES
+from generate_card import generate_card, suggest_template, ASPECT_SIZES, TEMPLATES
 
 # ============================================================
-# Page config + 緊湊化 CSS（修 Streamlit 預設頂部 toolbar + 手機排版）
+# Secrets fallback (Streamlit Cloud → env var)
+# ============================================================
+
+try:
+    for key in ("GEMINI_API_KEY", "GEMINI_MODEL"):
+        if key in st.secrets:
+            os.environ[key] = st.secrets[key]
+except Exception:
+    pass  # 本機跑無 st.secrets
+
+# ============================================================
+# Page config + 緊湊化 CSS
 # ============================================================
 
 st.set_page_config(
     page_title="商品卡產生器", page_icon="🏷️",
-    layout="centered",
-    initial_sidebar_state="collapsed",
+    layout="centered", initial_sidebar_state="collapsed",
 )
 
 st.markdown("""
 <style>
-/* 隱藏 Streamlit 預設 header 的紅 bar / 工具列 */
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-header {visibility: hidden; height: 0;}
+#MainMenu, footer, header {visibility: hidden; height: 0;}
 .stDeployButton {display: none;}
-
-/* 主容器緊貼頂部，手機也不浪費空間 */
 .block-container {
     padding-top: 0.8rem !important;
     padding-bottom: 1rem !important;
     max-width: 780px;
 }
-
-/* 按鈕全寬，手機更好按 */
 .stButton button, .stDownloadButton button { width: 100%; }
-
-/* 標題緊湊 */
 h1 { font-size: 1.5rem !important; margin-bottom: 0.2rem !important; }
 h2 { font-size: 1.1rem !important; }
-
-/* 手機 viewport */
 @media (max-width: 480px) {
     .block-container { padding: 0.5rem !important; }
     h1 { font-size: 1.25rem !important; }
-    .stRadio label p, .stSelectbox label p, .stTextInput label p { font-size: 0.9rem; }
 }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🏷️ 商品卡產生器")
-st.caption("丟原圖 + 填 3 欄 → IG / 代購 / Line 群可用。背景不後製，只加 overlay。")
+st.caption("丟原圖 + 填 3 欄 → IG / 代購 / Line 群可用。3 個商品 DM 版型可選。")
 
 # ============================================================
-# 模式 + 共用設定（compact：one row）
+# 版型說明與對應圖
 # ============================================================
 
-col_m, col_a, col_bg = st.columns([1.1, 1, 1])
+TEMPLATE_LABELS = {
+    "clean":          "A · 乾淨商品照（白底 / 極簡）",
+    "korean_beauty":  "B · K-beauty（軟色調 + 圓貼紙）",
+    "taiwan_daigou":  "C · 台灣代購（黃紅色塊 + 大價格）",
+}
+
+# ============================================================
+# 共用設定 ─ 一排三欄
+# ============================================================
+
+col_m, col_a, col_t = st.columns([1, 1, 1.4])
 with col_m:
-    mode = st.radio("模式", ["單張", "批次"], horizontal=True, label_visibility="visible")
+    mode = st.radio("模式", ["單張", "批次"], horizontal=True)
 with col_a:
     aspect = st.selectbox("比例", list(ASPECT_SIZES.keys()), index=0)
-with col_bg:
-    bg_mode = st.selectbox("留白", ["blur", "white", "black"], index=0,
-                           help="原圖等比塞進畫布後，上下/左右空白怎麼補")
+with col_t:
+    template_label = st.selectbox(
+        "版型",
+        ["（自動偵測）"] + list(TEMPLATE_LABELS.values()),
+        index=0,
+        help="自動偵測會依商品圖判斷適合版型",
+    )
+
+def resolve_template(label: str, image_path: str | None = None) -> str:
+    if label == "（自動偵測）":
+        if image_path:
+            return suggest_template(image_path)
+        return "clean"
+    for k, v in TEMPLATE_LABELS.items():
+        if v == label:
+            return k
+    return "clean"
 
 # ============================================================
 # 單張模式
@@ -85,31 +108,17 @@ if mode == "單張":
         label_visibility="collapsed",
     )
 
-    # OCR inline：縮小不佔空間
-    use_ocr = False
-    if os.environ.get("GEMINI_API_KEY"):
-        use_ocr = st.checkbox("🇰🇷 Vision 讀韓文自動填規格/價格（品名仍自己打）",
-                              value=False)
+    # 顯示 auto-suggest（有圖時）
+    if file and template_label == "（自動偵測）":
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+            tf.write(file.getvalue())
+            peek_path = tf.name
+        auto_t = suggest_template(peek_path)
+        st.info(f"🔍 自動建議版型：**{TEMPLATE_LABELS[auto_t]}**（可在上方版型手動覆蓋）")
 
-    col_n = st.container()
-    name  = col_n.text_input("品名（中文自己打）",
-                             placeholder="MEDIHEAL 楮樹美白4D面膜")
-
-    col_s, col_p = st.columns(2)
-    specs = col_s.text_input("規格",
-                             value=st.session_state.get("prefill_specs", ""),
-                             placeholder="一片")
-    price = col_p.text_input("價格",
-                             value=st.session_state.get("prefill_price", ""),
-                             placeholder="NT$89")
-
-    with st.expander("標籤（可選）"):
-        badge = st.selectbox("", ["(無)", "熱銷", "限量", "新品", "預購", "特價"],
-                             label_visibility="collapsed")
-
-    # OCR 預讀（用 inline button，不浮空）
-    if use_ocr and file:
-        if st.button("🔍 先讀韓文包裝（可省略跳過）", type="secondary"):
+    # OCR inline（只在有 GEMINI_API_KEY 才顯示）
+    if os.environ.get("GEMINI_API_KEY") and file:
+        if st.button("🇰🇷 讀韓文包裝自動填規格/價格", type="secondary"):
             try:
                 from vision_extract import extract
                 with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
@@ -117,7 +126,7 @@ if mode == "單張":
                     tmp_path = tf.name
                 with st.spinner("Gemini Vision 讀取..."):
                     info = extract(tmp_path)
-                st.success("讀取成功，請確認/修改欄位：")
+                st.success("讀取成功，欄位已預填：")
                 st.json(info)
                 if info.get("specs"):
                     st.session_state["prefill_specs"] = info["specs"]
@@ -127,7 +136,20 @@ if mode == "單張":
             except Exception as e:
                 st.error(f"OCR 失敗：{e}")
 
-    # 主按鈕
+    name = st.text_input("品名（中文自己打）",
+                         placeholder="MEDIHEAL 楮樹美白4D面膜")
+    col_s, col_p = st.columns(2)
+    specs = col_s.text_input("規格",
+                             value=st.session_state.get("prefill_specs", ""),
+                             placeholder="一片")
+    price = col_p.text_input("價格",
+                             value=st.session_state.get("prefill_price", ""),
+                             placeholder="NT$89")
+
+    with st.expander("標籤（可選）"):
+        tag = st.selectbox("", ["(無)", "現貨", "預購", "熱銷", "限量", "新品", "特價"],
+                           label_visibility="collapsed")
+
     go = st.button("✨ 產出商品卡", type="primary",
                    disabled=not (file and name))
 
@@ -135,15 +157,17 @@ if mode == "單張":
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
             tf.write(file.getvalue())
             in_path = tf.name
+        template_key = resolve_template(template_label, in_path)
         out_path = Path(tempfile.gettempdir()) / f"card_{Path(file.name).stem}.jpg"
         generate_card(
             image_path=in_path, name=name, specs=specs or "",
             price=price or "", out_path=str(out_path),
-            aspect=aspect,
-            badge=None if badge == "(無)" else badge,
-            bg_mode=bg_mode,
+            aspect=aspect, template=template_key,
+            tag=None if tag == "(無)" else tag,
         )
-        st.image(str(out_path), caption=f"{aspect} 商品卡", use_container_width=True)
+        st.image(str(out_path),
+                 caption=f"{aspect} · {TEMPLATE_LABELS[template_key]}",
+                 use_container_width=True)
         with open(out_path, "rb") as f:
             st.download_button("⬇️ 下載 JPG", f, file_name=out_path.name,
                                mime="image/jpeg")
@@ -176,12 +200,13 @@ else:
                 with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
                     tf.write(f.getvalue())
                     in_path = tf.name
+                template_key = resolve_template(template_label, in_path)
                 out_path = out_dir / f"card_{Path(f.name).stem}.jpg"
                 generate_card(
                     image_path=in_path, name=row.品名,
                     specs=row.規格 or "", price=row.價格 or "",
                     out_path=str(out_path), aspect=aspect,
-                    badge=row.標籤 or None, bg_mode=bg_mode,
+                    template=template_key, tag=row.標籤 or None,
                 )
                 results.append(out_path)
                 progress.progress((i + 1) / len(files))

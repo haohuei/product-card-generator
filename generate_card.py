@@ -440,92 +440,56 @@ def _render_taiwan_dm(src: Image.Image, size: Tuple[int, int],
 def _render_promo_bundle(src_paths, size, name, specs, price,
                          tag=None, extras=None):
     """
-    src_paths = 第一張必填（主商品）
-    extras = [path, ...] 可選 1-2 張額外商品圖（組合包）
+    E 模板 · 原圖當背景 + MISE EN SCÈNE 風格 overlay（不改底圖）
+    - 頂部黑色品牌 pill
+    - 左下巨大紫色 % 或 NT$
+    - 底部白色圓角 pill 放品名
+    - 右上可選 GIFT / 現貨 tag
+    - extras 參數保留但忽略（E 模板只用一張圖）
     """
     cw, ch = size
-    # 1) 底：黃色 + 底部漸層
-    canvas = Image.new("RGB", size, (255, 207, 46))
-    # 底部漸層到更亮的奶黃，製造光感
-    grad = Image.new("RGBA", size, (0, 0, 0, 0))
-    gmask = _gradient_alpha(cw, ch, max_alpha=120, ease=1.3, direction="down")
-    tint = Image.new("RGBA", size, (255, 236, 150, 255))
-    tint.putalpha(gmask)
-    canvas = Image.alpha_composite(canvas.convert("RGBA"), tint).convert("RGB")
+    # 原圖當全底：先 blur 版自己填滿畫布做背景，再等比原圖置中疊上
+    src = Image.open(src_paths).convert("RGB")
+    bg = src.copy()
+    bg_ratio = max(cw / bg.width, ch / bg.height)
+    bg = bg.resize((int(bg.width * bg_ratio), int(bg.height * bg_ratio)),
+                   Image.LANCZOS)
+    left = (bg.width - cw) // 2
+    top = (bg.height - ch) // 2
+    bg = bg.crop((left, top, left + cw, top + ch))
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=40))
+    dark = Image.new("RGB", (cw, ch), (0, 0, 0))
+    bg = Image.blend(bg, dark, 0.15)
+    canvas = bg
+    # 置中疊原圖
+    x, y, nw, nh = _fit_contain(src, canvas)
+    main = src.resize((nw, nh), Image.LANCZOS)
+    canvas.paste(main, (x, y))
     draw = ImageDraw.Draw(canvas)
 
-    # 2) 頂部品牌 pill（抓品牌：空白分隔前 2 詞 or 全名若短）
+    # 2) 頂部品牌 pill：只抓第一個空白前的英文/品牌名，太長或無空白則省略 pill
     tokens = name.split()
-    if len(tokens) >= 2 and len(" ".join(tokens[:2])) <= 22:
-        brand_label = " ".join(tokens[:2])
-    elif len(tokens) >= 1 and len(tokens[0]) <= 22:
-        brand_label = tokens[0]
+    brand_label = None
+    if len(tokens) >= 2 and len(tokens[0]) <= 18:
+        brand_label = tokens[0]  # 第一個 token（英文品牌）
+    if brand_label:
+        brand_font = _load_font(_find_font(FONT_CANDIDATES_BOLD), int(cw * 0.038))
+        bbox = draw.textbbox((0, 0), brand_label, font=brand_font)
+        tw = bbox[2] - bbox[0]; th = bbox[3] - bbox[1]
+        px, py = int(cw * 0.04), int(cw * 0.016)
+        bx1 = (cw - tw - px * 2) // 2
+        by1 = int(ch * 0.035)
+        bx2 = bx1 + tw + px * 2
+        by2 = by1 + th + py * 2
+        draw.rounded_rectangle([(bx1, by1), (bx2, by2)],
+                               radius=int((by2 - by1) * 0.5),
+                               fill=(20, 20, 20))
+        draw.text((bx1 + px, by1 + py - 2), brand_label,
+                  fill=(255, 255, 255), font=brand_font)
     else:
-        brand_label = name[:22]
-    brand_font = _load_font(_find_font(FONT_CANDIDATES_BOLD), int(cw * 0.038))
-    bbox = draw.textbbox((0, 0), brand_label, font=brand_font)
-    tw = bbox[2] - bbox[0]; th = bbox[3] - bbox[1]
-    px, py = int(cw * 0.04), int(cw * 0.016)
-    bx1 = (cw - tw - px * 2) // 2
-    by1 = int(ch * 0.035)
-    bx2 = bx1 + tw + px * 2
-    by2 = by1 + th + py * 2
-    draw.rounded_rectangle([(bx1, by1), (bx2, by2)],
-                           radius=int((by2 - by1) * 0.5),
-                           fill=(20, 20, 20))
-    draw.text((bx1 + px, by1 + py - 2), brand_label,
-              fill=(255, 255, 255), font=brand_font)
+        by2 = int(ch * 0.035)  # 無 pill 時給一個基準 y
 
-    # 3) 商品區：橫排 1-3 張 + 「+」圓圈
-    all_imgs = [Image.open(p).convert("RGBA") for p in [src_paths] + (extras or [])]
-    n = len(all_imgs)
-    product_zone_top = by2 + int(ch * 0.03)
-    product_zone_bot = int(ch * 0.62)
-    zone_h = product_zone_bot - product_zone_top
-    zone_w = int(cw * 0.86)
-    zone_x = (cw - zone_w) // 2
-
-    # 配置：每張商品等寬，之間留 "+" 空間
-    gap_w = int(cw * 0.07)
-    item_w = (zone_w - gap_w * (n - 1)) // n if n > 0 else zone_w
-
-    positions = []  # (x, y, w, h) for each item
-    for i in range(n):
-        ix = zone_x + i * (item_w + gap_w)
-        positions.append((ix, product_zone_top, item_w, zone_h))
-
-    for i, (img, (ix, iy, iw, ih)) in enumerate(zip(all_imgs, positions)):
-        ratio = min(iw / img.width, ih / img.height)
-        nw, nh = int(img.width * ratio), int(img.height * ratio)
-        px_x = ix + (iw - nw) // 2
-        px_y = iy + (ih - nh) // 2
-        resized = img.resize((nw, nh), Image.LANCZOS)
-        # 柔和陰影
-        sh = Image.new("RGBA", size, (0, 0, 0, 0))
-        sd = ImageDraw.Draw(sh)
-        sd.rounded_rectangle([(px_x + 5, px_y + 10), (px_x + nw + 5, px_y + nh + 10)],
-                             radius=10, fill=(100, 70, 0, 60))
-        sh = sh.filter(ImageFilter.GaussianBlur(radius=15))
-        canvas = Image.alpha_composite(canvas.convert("RGBA"), sh).convert("RGB")
-        canvas.paste(resized, (px_x, px_y), resized if resized.mode == "RGBA" else None)
-
-    # 重取 draw（canvas 可能已 re-create）
-    draw = ImageDraw.Draw(canvas)
-
-    # 「+」紫色圓圈，放在每兩張商品中間
-    if n > 1:
-        plus_font = _load_font(_find_font(FONT_CANDIDATES_BOLD), int(cw * 0.055))
-        r = int(cw * 0.038)
-        cy = product_zone_top + zone_h // 2
-        for i in range(n - 1):
-            cx = zone_x + (i + 1) * item_w + i * gap_w + gap_w // 2
-            draw.ellipse([(cx - r, cy - r), (cx + r, cy + r)],
-                         fill=(80, 55, 180))
-            # 「+」
-            bb = draw.textbbox((0, 0), "+", font=plus_font)
-            pw = bb[2] - bb[0]; ph = bb[3] - bb[1]
-            draw.text((cx - pw // 2, cy - ph // 2 - int(cw * 0.012)),
-                      "+", fill=(255, 255, 255), font=plus_font)
+    # 3) （略 — E 模板不再做多商品 + 連接，使用者要「直接在這張照片上文字」）
 
     # 4) 巨大價格/折扣（紫色）— 左下，位於商品下方與底部 pill 之間
     if price:
